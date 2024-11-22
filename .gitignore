@@ -1,0 +1,9 @@
+# Ignorer les environnements virtuels
+venv/
+
+# Ignorer les fichiers de configuration de l'éditeur
+.vscode/
+
+# Ignorer le dataset
+champi/
+archive/
