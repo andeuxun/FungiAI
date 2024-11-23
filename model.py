@@ -14,9 +14,9 @@ from tensorflow import keras
 import tensorflow as tf
 import pathlib
 from tensorflow.keras import layers  # type: ignore
-import numpy as np
 from tensorflow.keras.models import Sequential  # type: ignore
 from tensorflow.keras.applications.inception_v3 import preprocess_input
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
@@ -68,7 +68,8 @@ AUTOTUNE = tf.data.AUTOTUNE
 train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
 val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-# Ajouter des augmentations de données
+
+# Prétraitement des données avec preprocess_input
 data_augmentation = keras.Sequential(
     [
         layers.RandomFlip("horizontal", input_shape=(img_height, img_width, 3)),
@@ -79,63 +80,74 @@ data_augmentation = keras.Sequential(
     ]
 )
 
-# Charger un modèle pré-entraîné
 base_model = tf.keras.applications.InceptionV3(
     input_shape=(img_height, img_width, 3),
     include_top=False,
     weights='imagenet'
 )
 
-base_model.trainable = False  # Geler les couches du modèle pré-entraîné
+# Débloquer les dernières couches pour fine-tuning
+base_model.trainable = True
+for layer in base_model.layers[:-50]:  # Garder les 50 dernières couches "entraînables"
+    layer.trainable = False
 
-# Créer le modèle complet
+# Définir le nombre de classes
 num_classes = len(selected_classes)
 
-# model = Sequential([
-#     data_augmentation,
-#     layers.Rescaling(1./255),  # Normalisation des images
-#     base_model,
-#     layers.GlobalAveragePooling2D(),  # Récupère des caractéristiques globales
-#     layers.Dropout(0.4),  # Régularisation plus forte
-#     layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
-#     layers.Dropout(0.3),
-#     layers.Dense(num_classes, activation='softmax')  # Softmax pour classification multi-classes
-# ])
-
-# Ajout de tes propres couches
+# Construire le modèle
 model = Sequential([
-    data_augmentation,  # Augmentation des données
-    layers.Rescaling(1./255),  # Normalisation (prétraitement alternatif, ou utilise preprocess_input)
-    #layers.Lambda(preprocess_input),  # Transforme les données pour InceptionV3
-    base_model,  # Modèle InceptionV3
-    layers.GlobalAveragePooling2D(),  # Remplace Flatten pour réduire les dimensions
-    layers.Dense(256, activation='relu'),  # Couche dense personnalisée
-    layers.Dropout(0.5),  # Régularisation
-    layers.Dense(num_classes, activation='softmax')  # Couche de sortie
+    data_augmentation,
+    layers.Lambda(preprocess_input),  # Prétraitement spécifique au modèle
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+    layers.Dropout(0.5),
+    layers.Dense(num_classes, activation='softmax')
 ])
-# Définir un scheduler pour réduire le learning rate progressivement
-lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=0.001,
-    decay_steps=10000,
-    decay_rate=0.9
-)
 
-# Compilation du modèle
+# Compile avec un optimiseur et un learning rate scheduler
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
     loss=tf.keras.losses.SparseCategoricalCrossentropy(),
     metrics=['accuracy']
 )
 
-# Définir des callbacks
-callbacks = [
-    tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-    tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
-]
 
-# Entraîner le modèle
-epochs = 25
-history = model.fit(train_ds, validation_data=val_ds, epochs=epochs, callbacks=callbacks)
+# Callbacks pour EarlyStopping et ajustement du LR
+early_stopping = EarlyStopping(
+    monitor='val_loss', 
+    patience=5, 
+    restore_best_weights=True, 
+    verbose=1
+)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss', 
+    factor=0.5, 
+    patience=3, 
+    min_lr=1e-6, 
+    verbose=1
+)
+
+# Entraînement du modèle
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=25,
+    callbacks=[early_stopping, reduce_lr]
+)
+
+
+# Callbacks pour EarlyStopping et ajustement du LR
+callbacks = [early_stopping, reduce_lr]
+
+# Phase 1 : Entraînement initial avec les couches gelées
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=25,
+    callbacks=[early_stopping, reduce_lr]  # Callbacks déjà définis
+)
 
 # Dégelez certaines couches pour fine-tuning
 base_model.trainable = True
@@ -154,8 +166,6 @@ model.compile(
 history_fine_tune = model.fit(train_ds, validation_data=val_ds, epochs=25, callbacks=callbacks)
 
 
-
-
 # visualiser les résultats de l'entraînement
 acc = history.history['accuracy']
 val_acc = history.history['val_accuracy']
@@ -163,6 +173,7 @@ val_acc = history.history['val_accuracy']
 loss = history.history['loss']
 val_loss = history.history['val_loss']
 
+epochs = 20
 epochs_range = range(epochs)
 
 plt.figure(figsize=(8, 8))
